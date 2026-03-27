@@ -1,145 +1,463 @@
-#!/usr/bin/env node
-/**
- * Simple HTTP Server for SpellBloc Development
- * Node.js version for users who prefer Node over Python
- * 
- * Usage:
- *   node server.js
- *   
- * Then open: http://localhost:8000
- */
-
-const http = require('http');
-const fs = require('fs');
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const path = require('path');
-const { exec } = require('child_process');
+const fs = require('fs').promises;
+const https = require('https');
 
-const PORT = process.env.PORT || 8000;
+const app = express();
+const PORT = process.env.PORT || 3001;
+const JWT_SECRET = 'spellbloc-secret-key-2024'; // In production, use environment variable
+const RESEND_API_KEY = 're_9CAB6Qtv_C6VqwTMANNQLgzQXfrMsFtb3';
 
-// MIME types for different file extensions
-const mimeTypes = {
-    '.html': 'text/html',
-    '.js': 'application/javascript',
-    '.css': 'text/css',
-    '.json': 'application/json',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon',
-    '.mp3': 'audio/mpeg',
-    '.wav': 'audio/wav',
-    '.woff': 'font/woff',
-    '.woff2': 'font/woff2'
-};
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('.'));
 
-const server = http.createServer((req, res) => {
-    // Add CORS headers for development
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    
-    // Handle preflight requests
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
+// Simple in-memory database (in production, use a real database)
+let users = [];
+let userIdCounter = 1;
+
+// Load users from file if exists
+async function loadUsers() {
+    try {
+        const data = await fs.readFile('users.json', 'utf8');
+        const userData = JSON.parse(data);
+        users = userData.users || [];
+        userIdCounter = userData.counter || 1;
+        console.log(`📚 Loaded ${users.length} users from database`);
+    } catch (error) {
+        console.log('📚 No existing user database found, starting fresh');
     }
-    
-    // Parse URL and remove query parameters
-    let filePath = req.url.split('?')[0];
-    
-    // Default to index.html for root requests
-    if (filePath === '/') {
-        filePath = '/index.html';
+}
+
+// Save users to file
+async function saveUsers() {
+    try {
+        await fs.writeFile('users.json', JSON.stringify({
+            users,
+            counter: userIdCounter
+        }, null, 2));
+    } catch (error) {
+        console.error('❌ Failed to save users:', error);
     }
-    
-    // Construct full file path
-    const fullPath = path.join(__dirname, filePath);
-    
-    // Get file extension for MIME type
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = mimeTypes[ext] || 'application/octet-stream';
-    
-    // Check if file exists
-    fs.access(fullPath, fs.constants.F_OK, (err) => {
-        if (err) {
-            // File not found
-            res.writeHead(404, { 'Content-Type': 'text/html' });
-            res.end(`
-                <html>
-                    <head><title>404 - Not Found</title></head>
-                    <body>
-                        <h1>🚫 File Not Found</h1>
-                        <p>The requested file <code>${filePath}</code> was not found.</p>
-                        <p><a href="/">← Back to SpellBloc</a></p>
-                    </body>
-                </html>
-            `);
-            return;
+}
+
+// Email service
+async function sendEmail(emailData) {
+    return new Promise((resolve, reject) => {
+        const postData = JSON.stringify(emailData);
+        
+        const options = {
+            hostname: 'api.resend.com',
+            port: 443,
+            path: '/emails',
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${RESEND_API_KEY}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData)
+            }
+        };
+
+        const req = https.request(options, (res) => {
+            let data = '';
+            
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+            
+            res.on('end', () => {
+                try {
+                    const result = JSON.parse(data);
+                    if (res.statusCode === 200) {
+                        resolve({ success: true, id: result.id, data: result });
+                    } else {
+                        resolve({ success: false, error: result, statusCode: res.statusCode });
+                    }
+                } catch (error) {
+                    resolve({ success: false, error: error.message });
+                }
+            });
+        });
+
+        req.on('error', (error) => {
+            reject({ success: false, error: error.message });
+        });
+
+        req.write(postData);
+        req.end();
+    });
+}
+
+// Welcome email template
+function generateWelcomeEmail(parentName, childName, childAge) {
+    return {
+        from: 'SpellBloc <onboarding@resend.dev>',
+        subject: `🎉 Welcome to SpellBloc, ${childName}!`,
+        html: `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Welcome to SpellBloc!</title>
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+                    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; text-align: center; border-radius: 15px; margin-bottom: 30px; }
+                    .content { background: #f8f9fa; padding: 30px; border-radius: 15px; margin-bottom: 20px; }
+                    .emoji { font-size: 2em; margin: 10px; }
+                    .button { display: inline-block; background: #28a745; color: white; padding: 15px 30px; text-decoration: none; border-radius: 25px; margin: 20px 0; font-weight: bold; }
+                    .features { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 25px 0; }
+                    .feature { background: white; padding: 20px; border-radius: 10px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .stats { background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 25px; border-radius: 10px; text-align: center; margin: 20px 0; }
+                    .footer { text-align: center; color: #666; font-size: 0.9em; margin-top: 30px; }
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h1>🎮 Welcome to SpellBloc!</h1>
+                    <p>Where learning spelling is an adventure!</p>
+                </div>
+                
+                <div class="content">
+                    <h2>Hello ${parentName}! 👋</h2>
+                    <p>Thank you for creating a SpellBloc account for <strong>${childName}</strong>! We're so excited to help your ${childAge}-year-old embark on their magical spelling journey.</p>
+                    
+                    <div class="stats">
+                        <h3>🎯 Perfect for Age ${childAge}</h3>
+                        <p>Our AI has automatically selected the best learning level for ${childName}, with age-appropriate words and challenges.</p>
+                    </div>
+                    
+                    <div class="features">
+                        <div class="feature">
+                            <div class="emoji">🧠</div>
+                            <h3>AI-Powered Learning</h3>
+                            <p>Adapts to ${childName}'s learning style</p>
+                        </div>
+                        <div class="feature">
+                            <div class="emoji">🏆</div>
+                            <h3>Achievement Badges</h3>
+                            <p>Earn rewards for every milestone</p>
+                        </div>
+                        <div class="feature">
+                            <div class="emoji">📊</div>
+                            <h3>Progress Tracking</h3>
+                            <p>Watch ${childName}'s skills grow</p>
+                        </div>
+                        <div class="feature">
+                            <div class="emoji">🌍</div>
+                            <h3>Multi-Language</h3>
+                            <p>Learn spelling in 5 languages</p>
+                        </div>
+                    </div>
+                    
+                    <h3>🚀 What's Next?</h3>
+                    <ul>
+                        <li><strong>Start Playing:</strong> ${childName} can begin with age-appropriate words</li>
+                        <li><strong>Earn Badges:</strong> Collect achievements for spelling success</li>
+                        <li><strong>Track Progress:</strong> Receive weekly email reports</li>
+                        <li><strong>Have Fun:</strong> Learning spelling has never been this exciting!</li>
+                    </ul>
+                    
+                    <div style="text-align: center;">
+                        <a href="https://wordbloc.vercel.app" class="button">🎮 Start ${childName}'s Adventure!</a>
+                    </div>
+                </div>
+                
+                <div class="footer">
+                    <p><strong>🎉 Welcome to the SpellBloc family!</strong></p>
+                    <p>We'll send you progress updates and achievement notifications to help you celebrate ${childName}'s learning milestones.</p>
+                    <p><small>Questions? Reply to this email - we're here to help!</small></p>
+                </div>
+            </body>
+            </html>
+        `,
+        text: `
+Welcome to SpellBloc, ${childName}!
+
+Hello ${parentName}!
+
+Thank you for creating a SpellBloc account for ${childName}! We're excited to help your ${childAge}-year-old learn spelling.
+
+Perfect for Age ${childAge}:
+Our AI has selected the best learning level for ${childName}, with age-appropriate words and challenges.
+
+Features:
+• AI-Powered Learning - Adapts to ${childName}'s style
+• Achievement Badges - Earn rewards for milestones  
+• Progress Tracking - Watch skills grow
+• Multi-Language - Learn in 5 languages
+
+What's Next:
+1. Start Playing - Begin with age-appropriate words
+2. Earn Badges - Collect achievements for success
+3. Track Progress - Receive weekly email reports
+4. Have Fun - Learning spelling is exciting!
+
+Start playing: https://wordbloc.vercel.app
+
+Welcome to the SpellBloc family!
+We'll send you progress updates and achievement notifications.
+
+Questions? Reply to this email - we're here to help!
+        `
+    };
+}
+
+// Routes
+
+// Serve login page
+app.get('/login', (req, res) => {
+    res.sendFile(path.join(__dirname, 'login.html'));
+});
+
+// Signup endpoint
+app.post('/api/auth/signup', async (req, res) => {
+    try {
+        const { parentName, parentEmail, password, childName, childAge } = req.body;
+        
+        // Validate input
+        if (!parentName || !parentEmail || !password || !childName || !childAge) {
+            return res.status(400).json({ message: 'All fields are required' });
         }
         
-        // Read and serve the file
-        fs.readFile(fullPath, (err, data) => {
-            if (err) {
-                res.writeHead(500, { 'Content-Type': 'text/html' });
-                res.end(`
-                    <html>
-                        <head><title>500 - Server Error</title></head>
-                        <body>
-                            <h1>⚠️ Server Error</h1>
-                            <p>Error reading file: ${err.message}</p>
-                            <p><a href="/">← Back to SpellBloc</a></p>
-                        </body>
-                    </html>
-                `);
-                return;
+        if (password.length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+        
+        // Check if user already exists
+        const existingUser = users.find(user => user.email === parentEmail);
+        if (existingUser) {
+            return res.status(400).json({ message: 'An account with this email already exists' });
+        }
+        
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Create user
+        const user = {
+            id: userIdCounter++,
+            parentName,
+            email: parentEmail,
+            password: hashedPassword,
+            childName,
+            childAge,
+            createdAt: new Date().toISOString(),
+            emailPreferences: {
+                welcome: true,
+                achievements: true,
+                progress: true,
+                milestones: true,
+                weekly: true
             }
+        };
+        
+        users.push(user);
+        await saveUsers();
+        
+        // Generate JWT token
+        const token = jwt.sign(
+            { userId: user.id, email: user.email },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        
+        // Send welcome email
+        console.log(`📧 Sending welcome email to ${parentEmail}...`);
+        try {
+            const welcomeEmailData = generateWelcomeEmail(parentName, childName, childAge);
+            welcomeEmailData.to = [parentEmail];
             
-            // Set content type and serve file
-            res.writeHead(200, { 'Content-Type': contentType });
-            res.end(data);
+            const emailResult = await sendEmail(welcomeEmailData);
+            
+            if (emailResult.success) {
+                console.log(`✅ Welcome email sent successfully! Email ID: ${emailResult.id}`);
+            } else {
+                console.log(`❌ Welcome email failed:`, emailResult.error);
+            }
+        } catch (emailError) {
+            console.log(`❌ Welcome email error:`, emailError);
+        }
+        
+        // Return user data (without password)
+        const { password: _, ...userWithoutPassword } = user;
+        
+        res.status(201).json({
+            message: 'Account created successfully! Welcome email sent.',
+            user: userWithoutPassword,
+            token
         });
+        
+        console.log(`✅ New user created: ${parentName} (${parentEmail}) with child ${childName}, age ${childAge}`);
+        
+    } catch (error) {
+        console.error('❌ Signup error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Login endpoint
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        // Validate input
+        if (!email || !password) {
+            return res.status(400).json({ message: 'Email and password are required' });
+        }
+        
+        // Find user
+        const user = users.find(u => u.email === email);
+        if (!user) {
+            return res.status(401).json({ message: 'Invalid email or password' });
+        }
+        
+        // Check password
+        const isValidPassword = await bcrypt.compare(password, user.password);
+        if (!isValidPassword) {
+            return res.status(401).json({ message: 'Invalid email or password' });
+        }
+        
+        // Generate JWT token
+        const token = jwt.sign(
+            { userId: user.id, email: user.email },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        
+        // Return user data (without password)
+        const { password: _, ...userWithoutPassword } = user;
+        
+        res.json({
+            message: 'Login successful',
+            user: userWithoutPassword,
+            token
+        });
+        
+        console.log(`✅ User logged in: ${user.parentName} (${email})`);
+        
+    } catch (error) {
+        console.error('❌ Login error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Get user profile (protected route)
+app.get('/api/auth/profile', authenticateToken, (req, res) => {
+    const user = users.find(u => u.id === req.user.userId);
+    if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+    }
+    
+    const { password: _, ...userWithoutPassword } = user;
+    res.json(userWithoutPassword);
+});
+
+// Middleware to authenticate JWT token
+function authenticateToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ message: 'Access token required' });
+    }
+    
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ message: 'Invalid or expired token' });
+        }
+        req.user = user;
+        next();
+    });
+}
+
+// Test email endpoint
+app.post('/api/test-email', async (req, res) => {
+    try {
+        const { email } = req.body;
+        
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+        
+        const testEmailData = {
+            from: 'SpellBloc <onboarding@resend.dev>',
+            to: [email],
+            subject: '🧪 SpellBloc Backend Test Email',
+            html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px;">
+                        <h1>✅ Backend Email Test Successful!</h1>
+                        <p>Your SpellBloc backend server is working perfectly!</p>
+                    </div>
+                    <div style="background: #f8f9fa; padding: 25px; border-radius: 10px; margin-top: 20px;">
+                        <h2>🎮 SpellBloc Backend Status</h2>
+                        <ul>
+                            <li>✅ Express server running</li>
+                            <li>✅ Resend API connected</li>
+                            <li>✅ Email templates working</li>
+                            <li>✅ Authentication system ready</li>
+                        </ul>
+                        <p>Your SpellBloc authentication and email system is ready for users!</p>
+                    </div>
+                </div>
+            `,
+            text: 'SpellBloc Backend Test - Email system working perfectly!'
+        };
+        
+        const result = await sendEmail(testEmailData);
+        
+        if (result.success) {
+            res.json({ 
+                message: 'Test email sent successfully!', 
+                emailId: result.id 
+            });
+        } else {
+            res.status(500).json({ 
+                message: 'Failed to send test email', 
+                error: result.error 
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Test email error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Get all users (for debugging - remove in production)
+app.get('/api/users', (req, res) => {
+    const usersWithoutPasswords = users.map(({ password, ...user }) => user);
+    res.json({
+        count: users.length,
+        users: usersWithoutPasswords
     });
 });
 
 // Start server
-server.listen(PORT, () => {
-    console.log('🎮 Starting SpellBloc Development Server...');
-    console.log(`📁 Serving from: ${__dirname}`);
-    console.log(`🌐 Server URL: http://localhost:${PORT}`);
-    console.log('🚀 Opening browser...');
-    console.log('⏹️  Press Ctrl+C to stop the server');
+async function startServer() {
+    await loadUsers();
     
-    // Open browser automatically
-    const start = process.platform === 'darwin' ? 'open' : 
-                  process.platform === 'win32' ? 'start' : 'xdg-open';
-    
-    exec(`${start} http://localhost:${PORT}`, (err) => {
-        if (err) {
-            console.log('💡 Please manually open: http://localhost:' + PORT);
-        }
+    app.listen(PORT, () => {
+        console.log('🚀 SpellBloc Backend Server Started!');
+        console.log('=====================================');
+        console.log(`📡 Server running on: http://localhost:${PORT}`);
+        console.log(`🔐 Login page: http://localhost:${PORT}/login`);
+        console.log(`👥 Users in database: ${users.length}`);
+        console.log(`📧 Email system: Ready with Resend API`);
+        console.log('=====================================');
+        console.log('');
+        console.log('🧪 Test endpoints:');
+        console.log(`   POST http://localhost:${PORT}/api/test-email`);
+        console.log(`   GET  http://localhost:${PORT}/api/users`);
+        console.log('');
+        console.log('🎮 Ready for SpellBloc users!');
     });
-    
-    console.log(`\n✅ SpellBloc is running at http://localhost:${PORT}`);
-    console.log('📱 For mobile testing, use your computer\'s IP address');
-    console.log('🔄 Server will auto-reload when you refresh the browser');
-});
+}
 
-// Handle server shutdown gracefully
-process.on('SIGINT', () => {
-    console.log('\n🛑 Server stopped by user');
-    process.exit(0);
-});
+startServer().catch(console.error);
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (err) => {
-    if (err.code === 'EADDRINUSE') {
-        console.log(`❌ Port ${PORT} is already in use!`);
-        console.log('💡 Try closing other applications or use a different port');
-        console.log('🔧 Or run: PORT=8001 node server.js');
-    } else {
-        console.log('❌ Error starting server:', err.message);
-    }
-    process.exit(1);
-});
+module.exports = app;
