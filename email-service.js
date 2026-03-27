@@ -1,7 +1,7 @@
 // SpellBloc Email Service using Resend API
 class EmailService {
     constructor() {
-        this.apiKey = 're_9CAB6Qtv_C6VqwTMANNQLgzQXfrMsFtb3';
+        this.apiKey = process.env.RESEND_API_KEY;
         this.baseUrl = 'https://api.resend.com';
         this.fromEmail = 'SpellBloc <onboarding@resend.dev>'; // Using Resend's verified domain
         this.isEnabled = true;

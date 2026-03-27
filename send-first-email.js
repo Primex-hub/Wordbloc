@@ -60,7 +60,7 @@ Visit SpellBloc: https://wordbloc.vercel.app
             path: '/emails',
             method: 'POST',
             headers: {
-                'Authorization': 'Bearer re_9CAB6Qtv_C6VqwTMANNQLgzQXfrMsFtb3',
+                'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(postData)
             }

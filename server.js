@@ -9,7 +9,7 @@ const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = 'spellbloc-secret-key-2024'; // In production, use environment variable
-const RESEND_API_KEY = 're_9CAB6Qtv_C6VqwTMANNQLgzQXfrMsFtb3';
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
 // Middleware
 app.use(cors());

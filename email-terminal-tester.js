@@ -5,7 +5,7 @@ const https = require('https');
 
 class TerminalEmailTester {
     constructor() {
-        this.apiKey = 're_9CAB6Qtv_C6VqwTMANNQLgzQXfrMsFtb3';
+        this.apiKey = process.env.RESEND_API_KEY;
         this.baseUrl = 'api.resend.com';
         this.fromEmail = 'SpellBloc <onboarding@resend.dev>'; // Using Resend's verified domain
         this.testResults = [];
